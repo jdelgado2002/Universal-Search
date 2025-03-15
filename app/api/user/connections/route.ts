@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/db"
 
 export async function GET(request: NextRequest) {
   // Get the authenticated user
@@ -11,8 +11,12 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    if (!session.user.id) {
+      return NextResponse.json({ error: "User ID not found" }, { status: 400 })
+    }
+
     // Check if the user has connected Google
-    const googleToken = await prisma.token.findUnique({
+    const googleToken = await db.token.findUnique({
       where: {
         userId_provider: {
           userId: session.user.id,

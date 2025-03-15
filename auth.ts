@@ -27,6 +27,7 @@ export const {
           prompt: "consent",
           access_type: "offline",
           response_type: "code",
+          scope: "openid email profile https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.metadata.readonly",
         },
       },
     }),
@@ -43,7 +44,7 @@ export const {
 
         const user = await db.user.findUnique({
           where: {
-            email: credentials.email,
+            email: credentials.email as string,
           },
         })
 
@@ -51,7 +52,7 @@ export const {
           return null
         }
 
-        const isPasswordValid = await bcrypt.compare(credentials.password, user.password)
+        const isPasswordValid = await bcrypt.compare(credentials.password as string, user.password as string)
 
         if (!isPasswordValid) {
           return null

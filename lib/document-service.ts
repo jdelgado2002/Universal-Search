@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/db"
 
 // Google API endpoints
 const GOOGLE_DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -14,7 +14,7 @@ export interface Document {
 
 export async function searchDocuments(userId: string, query: string): Promise<Document[]> {
   // Get the user's Google token from the database
-  const token = await prisma.token.findUnique({
+  const token = await db.token.findUnique({
     where: {
       userId_provider: {
         userId,
@@ -33,7 +33,7 @@ export async function searchDocuments(userId: string, query: string): Promise<Do
     const refreshedToken = await refreshToken(token.refreshToken!)
 
     // Update the token in the database
-    await prisma.token.update({
+    await db.token.update({
       where: {
         id: token.id,
       },
@@ -142,7 +142,7 @@ async function refreshToken(refreshToken: string) {
 
 export async function getAllDocuments(userId: string): Promise<Document[]> {
   // Get the user's Google token from the database
-  const token = await prisma.token.findUnique({
+  const token = await db.token.findUnique({
     where: {
       userId_provider: {
         userId,
@@ -161,7 +161,7 @@ export async function getAllDocuments(userId: string): Promise<Document[]> {
     const refreshedToken = await refreshToken(token.refreshToken!)
 
     // Update the token in the database
-    await prisma.token.update({
+    await db.token.update({
       where: {
         id: token.id,
       },

@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { cookies } from "next/headers"
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/db"
 
 // Google OAuth configuration
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!
@@ -65,7 +65,7 @@ export async function GET(request: NextRequest) {
     const tokenData = await tokenResponse.json()
 
     // Store the token in the database
-    await prisma.token.upsert({
+    await db.token.upsert({
       where: {
         userId_provider: {
           userId,
