@@ -1,23 +1,21 @@
 import NextAuth from "next-auth"
-import { PrismaAdapter } from "@auth/prisma-adapter"
-import { db } from "@/lib/db"
 import CredentialsProvider from "next-auth/providers/credentials"
 import GoogleProvider from "next-auth/providers/google"
 import bcrypt from "bcryptjs"
+import { db } from "@/lib/db"
 
 export const { 
-  handlers: { GET, POST },
+  handlers,
   auth,
   signIn,
   signOut
 } = NextAuth({
-  adapter: PrismaAdapter(db),
   session: {
     strategy: "jwt",
   },
   pages: {
     signIn: "/auth/signin",
-    signUp: "/auth/signup",
+    newUser: "/auth/signup",
     error: "/auth/error",
   },
   providers: [
@@ -74,29 +72,10 @@ export const {
         token.id = user.id
       }
 
-      // If we have an account with a provider, store the tokens
       if (account && account.provider === "google" && account.access_token) {
-        // Store the Google OAuth tokens in our database
-        await db.token.upsert({
-          where: {
-            userId_provider: {
-              userId: token.id as string,
-              provider: "google",
-            },
-          },
-          update: {
-            accessToken: account.access_token,
-            refreshToken: account.refresh_token,
-            expiresAt: account.expires_at ? new Date(account.expires_at * 1000) : new Date(Date.now() + 3600 * 1000),
-          },
-          create: {
-            userId: token.id as string,
-            provider: "google",
-            accessToken: account.access_token,
-            refreshToken: account.refresh_token,
-            expiresAt: account.expires_at ? new Date(account.expires_at * 1000) : new Date(Date.now() + 3600 * 1000),
-          },
-        })
+        token.accessToken = account.access_token
+        token.refreshToken = account.refresh_token
+        token.expiresAt = account.expires_at
       }
 
       return token
