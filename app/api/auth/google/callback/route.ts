@@ -1,96 +1,124 @@
-import { type NextRequest, NextResponse } from "next/server"
-import { cookies } from "next/headers"
+import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
-
-// Google OAuth configuration
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!
-const REDIRECT_URI = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`
+import { encryptToken } from "@/lib/encryption"
+import { getServerSession } from "next-auth"
+import { authOptions } from "@/lib/auth"
 
 export async function GET(request: NextRequest) {
-  const searchParams = request.nextUrl.searchParams
-  const code = searchParams.get("code")
-  const state = searchParams.get("state")
-  const error = searchParams.get("error")
-
-  // Check for OAuth errors
-  if (error) {
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=${error}`)
-  }
-
-  // Verify state to prevent CSRF attacks
-  const storedState = cookies().get("oauth_state")?.value
-
-  if (!storedState || storedState !== state) {
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=invalid_state`)
-  }
-
-  // Get the user ID from the cookie
-  const userId = cookies().get("oauth_user_id")?.value
-
-  if (!userId) {
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=no_user_id`)
-  }
-
-  // Delete the state and user ID cookies
-  cookies().delete("oauth_state")
-  cookies().delete("oauth_user_id")
-
-  if (!code) {
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=no_code`)
-  }
-
   try {
-    // Exchange code for tokens
-    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        code,
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        redirect_uri: REDIRECT_URI,
-        grant_type: "authorization_code",
-      }),
-    })
-
-    if (!tokenResponse.ok) {
-      const errorData = await tokenResponse.json()
-      console.error("Token exchange error:", errorData)
-      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=token_exchange_failed`)
+    const session = await getServerSession(authOptions)
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    const tokenData = await tokenResponse.json()
+    const searchParams = request.nextUrl.searchParams
+    const code = searchParams.get("code")
+    const error = searchParams.get("error")
 
-    // Store the token in the database
-    await db.token.upsert({
-      where: {
-        userId_provider: {
-          userId,
-          provider: "google",
-        },
-      },
-      update: {
-        accessToken: tokenData.access_token,
-        refreshToken: tokenData.refresh_token || undefined,
-        expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
-      },
-      create: {
-        userId,
-        provider: "google",
-        accessToken: tokenData.access_token,
-        refreshToken: tokenData.refresh_token || undefined,
-        expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
-      },
-    })
+    if (error) {
+      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=${error}`)
+    }
 
-    // Redirect to the dashboard
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/dashboard`)
+    if (!code) {
+      return NextResponse.json({ error: "No code provided" }, { status: 400 })
+    }
+
+    try {
+      const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code: code!,
+          client_id: process.env.GOOGLE_CLIENT_ID!,
+          client_secret: process.env.GOOGLE_CLIENT_SECRET!,
+          redirect_uri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`,
+          grant_type: "authorization_code",
+        }),
+      })
+
+      if (!tokenResponse.ok) {
+        throw new Error("Failed to exchange code for token")
+      }
+
+      const tokenData = await tokenResponse.json()
+      const encryptedToken = encryptToken(tokenData)
+
+      // Get user info to create/update user
+      const userResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      })
+      
+      if (!userResponse.ok) {
+        throw new Error("Failed to fetch user info")
+      }
+
+      const userData = await userResponse.json()
+
+      // Use transaction to ensure data consistency
+      await prisma.$transaction(async (tx) => {
+        // Create or update user
+        const user = await tx.user.upsert({
+          where: { email: userData.email },
+          create: {
+            email: userData.email,
+            name: userData.name,
+            image: userData.picture,
+          },
+          update: {
+            name: userData.name,
+            image: userData.picture,
+          },
+        })
+
+        // Store token
+        await tx.token.upsert({
+          where: { 
+            userId_provider: {
+              userId: user.id,
+              provider: "google"
+            }
+          },
+          create: {
+            userId: user.id,
+            provider: "google",
+            accessToken: encryptedToken,
+            expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
+          },
+          update: {
+            accessToken: encryptedToken,
+            expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
+          },
+        })
+
+        // Store the connection in the database
+        await tx.userConnection.upsert({
+          where: {
+            userId_provider: {
+              userId: session.user.id,
+              provider: "google"
+            }
+          },
+          update: {
+            isConnected: true,
+            lastConnected: new Date()
+          },
+          create: {
+            userId: session.user.id,
+            provider: "google",
+            isConnected: true,
+            lastConnected: new Date()
+          }
+        })
+      })
+
+      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/dashboard`)
+    } catch (error) {
+      console.error("Error exchanging code for token:", error)
+      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=token_exchange_failed`)
+    }
   } catch (error) {
-    console.error("Error exchanging code for token:", error)
-    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/?error=server_error`)
+    console.error("Error in Google callback:", error)
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }
 

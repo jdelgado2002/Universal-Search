@@ -1,37 +1,30 @@
-import { type NextRequest, NextResponse } from "next/server"
-import { auth } from "@/auth"
+import { NextResponse } from "next/server"
+import { getServerSession } from "next-auth"
 import { db } from "@/lib/db"
+import { authOptions } from "@/lib/auth"
 
-export async function GET(request: NextRequest) {
-  // Get the authenticated user
-  const session = await auth()
-
-  if (!session || !session.user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 })
-  }
-
+export async function GET() {
   try {
-    if (!session.user.id) {
-      return NextResponse.json({ error: "User ID not found" }, { status: 400 })
+    const session = await getServerSession(authOptions)
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Check if the user has connected Google
-    const googleToken = await db.token.findUnique({
+    const googleConnection = await db.userConnection.findUnique({
       where: {
         userId_provider: {
           userId: session.user.id,
-          provider: "google",
-        },
-      },
+          provider: "google"
+        }
+      }
     })
 
-    // Return the connections
     return NextResponse.json({
-      google: !!googleToken,
+      google: googleConnection?.isConnected ?? false
     })
   } catch (error) {
-    console.error("Error checking connections:", error)
-    return NextResponse.json({ error: "Server error" }, { status: 500 })
+    console.error("Error fetching connections:", error)
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }
 
