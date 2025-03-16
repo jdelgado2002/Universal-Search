@@ -8,9 +8,12 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!
 const REDIRECT_URI = `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`
 
 // Required scopes for Google Docs API
-const SCOPES = [
-  "https://www.googleapis.com/auth/documents.readonly",
+const REQUIRED_SCOPES = [
+  "openid",
+  "email",
+  "profile",
   "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/documents.readonly"
 ].join(" ")
 
 export async function GET(request: NextRequest) {
@@ -33,7 +36,7 @@ export async function GET(request: NextRequest) {
   })
 
   // Store the user ID in a cookie for the callback
-  cookies().set("oauth_user_id", session.user.id, {
+  cookies().set("oauth_user_id", session.user.id.toString(), {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     maxAge: 60 * 10, // 10 minutes
@@ -45,7 +48,7 @@ export async function GET(request: NextRequest) {
   authUrl.searchParams.append("client_id", GOOGLE_CLIENT_ID)
   authUrl.searchParams.append("redirect_uri", REDIRECT_URI)
   authUrl.searchParams.append("response_type", "code")
-  authUrl.searchParams.append("scope", SCOPES)
+  authUrl.searchParams.append("scope", REQUIRED_SCOPES)
   authUrl.searchParams.append("access_type", "offline")
   authUrl.searchParams.append("state", state)
   authUrl.searchParams.append("prompt", "consent")
