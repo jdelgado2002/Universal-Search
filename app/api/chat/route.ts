@@ -4,6 +4,7 @@ import { generateText } from "ai"
 import { openai } from "@ai-sdk/openai"
 import { searchDocuments, getAllDocuments } from "@/lib/document-service"
 import { z } from "zod"
+import { db } from "@/lib/db"
 
 // Type definitions
 interface ChatMessage {
@@ -26,8 +27,30 @@ export async function POST(request: NextRequest) {
   try {
     // Validate session
     const session = await auth()
-    if (!session?.user?.id) {
+    if (!session?.user?.email) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
+
+    // Find user by email and include their connections
+    const user = await db.user.findUnique({
+      where: { email: session.user.email },
+      include: {
+        connections: {
+          where: {
+            provider: "google",
+            isConnected: true
+          }
+        }
+      }
+    })
+
+    if (!user) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 })
+    }
+
+    // Check if user has active Google connection
+    if (!user.connections.length) {
+      return NextResponse.json({ error: "Google account not connected" }, { status: 403 })
     }
 
     // Validate request body
@@ -35,13 +58,13 @@ export async function POST(request: NextRequest) {
     const validatedBody = requestSchema.parse(body)
     const { message, history } = validatedBody
 
-    // Get documents
+    // Get documents using database user.id
     let documents = []
     if (message.toLowerCase().includes("search") || message.toLowerCase().includes("find")) {
       const searchTerms = message.replace(/search|find|for|about/gi, "").trim()
-      documents = await searchDocuments(session.user.id, searchTerms)
+      documents = await searchDocuments(user.id, searchTerms)
     } else {
-      documents = await getAllDocuments(session.user.id)
+      documents = await getAllDocuments(user.id)
     }
 
     // Prepare context

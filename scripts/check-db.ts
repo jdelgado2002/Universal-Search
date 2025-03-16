@@ -45,6 +45,20 @@ async function main() {
       hasAccount: conn.user.accounts.length > 0
     })))
 
+    console.log('\ntokens:')
+    const tokens = await prisma.token.findMany({
+      include: {
+        user: true
+      }
+    })
+    console.table(tokens.map(token => ({
+      tokenId: token.id,
+      userId: token.userId,
+      provider: token.provider,
+      accessToken: token.accessToken.trim().substring(0, 20) + '...',
+      expiresAt: token.expiresAt,
+      userEmail: token.user.email
+    })))
   } catch (error) {
     console.error('Database check failed:', error)
     process.exit(1)
