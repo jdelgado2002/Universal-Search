@@ -91,66 +91,75 @@ export async function searchDocuments(userId: string, query: string): Promise<Do
 }
 
 async function fetchDocumentContent(documentId: string, accessToken: string): Promise<string> {
-  let attempts = 0
-  
-  while (attempts < MAX_RETRIES) {
+  if (!accessToken?.trim()) {
+    throw new Error("Invalid access token")
+  }
+
+  const response = await fetch(`${GOOGLE_DOCS_API}/documents/${documentId}`, {
+    headers: {
+      'Authorization': `Bearer ${accessToken.trim()}`,
+      'Accept': 'application/json',
+    },
+  })
+
+  // Check if we got HTML instead of JSON (usually means auth error)
+  const contentType = response.headers.get('content-type')
+  if (contentType?.includes('text/html')) {
+    console.error('Authentication error - received HTML response:', {
+      documentId,
+      status: response.status,
+      contentType
+    })
+    throw new Error("Authentication failed - please reconnect your Google account")
+  }
+
+  // Handle specific error cases
+  if (response.status === 401) {
+    throw new Error("Token expired or invalid")
+  }
+
+  if (response.status === 403) {
+    throw new Error("Access denied to document")
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    let errorData
     try {
-      const response = await fetch(`${GOOGLE_DOCS_API}/documents/${documentId}`, {
-        headers: {
-          Authorization: `Bearer ${accessToken.trim()}`,
-          Accept: 'application/json',
-        },
-      })
+      errorData = JSON.parse(errorText)
+    } catch {
+      errorData = { error: errorText }
+    }
+    
+    console.error("Google API Error:", {
+      documentId,
+      status: response.status,
+      statusText: response.statusText,
+      errorData
+    })
+    throw new Error(`Failed to fetch document: ${response.status} ${response.statusText}`)
+  }
 
-      if (response.status === 401) {
-        throw new Error("Token expired or invalid")
-      }
+  const data = await response.json()
+  
+  if (!data?.body?.content) {
+    console.warn(`Document ${documentId} has no content`)
+    return ""
+  }
 
-      if (!response.ok) {
-        const errorData = await response.json()
-        console.error("Google API Error:", {
-          status: response.status,
-          statusText: response.statusText,
-          error: errorData
-        })
-        throw new Error(`API error: ${response.status} ${response.statusText}`)
-      }
-
-      const data = await response.json()
-      
-      if (!data.body?.content) {
-        console.warn(`Document ${documentId} has no content`)
-        return ""
-      }
-
-      // Extract text content from the document
-      let content = ""
-      for (const element of data.body.content) {
-        if (element.paragraph?.elements) {
-          for (const paragraphElement of element.paragraph.elements) {
-            if (paragraphElement.textRun?.content) {
-              content += paragraphElement.textRun.content
-            }
-          }
+  // Extract text content from the document
+  let content = ""
+  for (const element of data.body.content) {
+    if (element.paragraph?.elements) {
+      for (const paragraphElement of element.paragraph.elements) {
+        if (paragraphElement.textRun?.content) {
+          content += paragraphElement.textRun.content
         }
       }
-
-      return content
-
-    } catch (error) {
-      attempts++
-      console.error(`Attempt ${attempts}/${MAX_RETRIES} failed for document ${documentId}:`, error)
-      
-      if (error.message === "Token expired or invalid" || attempts === MAX_RETRIES) {
-        throw error
-      }
-      
-      // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * attempts))
     }
   }
 
-  throw new Error(`Failed to fetch document content after ${MAX_RETRIES} attempts`)
+  return content
 }
 
 async function refreshToken(refreshToken: string) {
