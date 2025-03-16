@@ -3,6 +3,8 @@ import { db } from "@/lib/db"
 // Google API endpoints
 const GOOGLE_DRIVE_API = "https://www.googleapis.com/drive/v3"
 const GOOGLE_DOCS_API = "https://www.googleapis.com/docs/v1"
+const MAX_RETRIES = 3
+const RETRY_DELAY = 1000 // 1 second
 
 export interface Document {
   id: string
@@ -89,34 +91,66 @@ export async function searchDocuments(userId: string, query: string): Promise<Do
 }
 
 async function fetchDocumentContent(documentId: string, accessToken: string): Promise<string> {
-  const response = await fetch(`${GOOGLE_DOCS_API}/documents/${documentId}`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  })
+  let attempts = 0
+  
+  while (attempts < MAX_RETRIES) {
+    try {
+      const response = await fetch(`${GOOGLE_DOCS_API}/documents/${documentId}`, {
+        headers: {
+          Authorization: `Bearer ${accessToken.trim()}`,
+          Accept: 'application/json',
+        },
+      })
 
-  if (!response.ok) {
-    throw new Error("Failed to fetch document content")
-  }
+      if (response.status === 401) {
+        throw new Error("Token expired or invalid")
+      }
 
-  const data = await response.json()
+      if (!response.ok) {
+        const errorData = await response.json()
+        console.error("Google API Error:", {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorData
+        })
+        throw new Error(`API error: ${response.status} ${response.statusText}`)
+      }
 
-  // Extract text content from the document
-  let content = ""
+      const data = await response.json()
+      
+      if (!data.body?.content) {
+        console.warn(`Document ${documentId} has no content`)
+        return ""
+      }
 
-  if (data.body && data.body.content) {
-    for (const element of data.body.content) {
-      if (element.paragraph) {
-        for (const paragraphElement of element.paragraph.elements) {
-          if (paragraphElement.textRun && paragraphElement.textRun.content) {
-            content += paragraphElement.textRun.content
+      // Extract text content from the document
+      let content = ""
+      for (const element of data.body.content) {
+        if (element.paragraph?.elements) {
+          for (const paragraphElement of element.paragraph.elements) {
+            if (paragraphElement.textRun?.content) {
+              content += paragraphElement.textRun.content
+            }
           }
         }
       }
+
+      return content
+
+    } catch (error) {
+      attempts++
+      console.error(`Attempt ${attempts}/${MAX_RETRIES} failed for document ${documentId}:`, error)
+      
+      if (error.message === "Token expired or invalid" || attempts === MAX_RETRIES) {
+        throw error
+      }
+      
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * attempts))
     }
   }
 
-  return content
+  throw new Error(`Failed to fetch document content after ${MAX_RETRIES} attempts`)
 }
 
 async function refreshToken(refreshToken: string) {
@@ -141,7 +175,6 @@ async function refreshToken(refreshToken: string) {
 }
 
 export async function getAllDocuments(userId: string): Promise<Document[]> {
-  // Get the user's Google token from the database
   const token = await db.token.findUnique({
     where: {
       userId_provider: {
@@ -155,63 +188,67 @@ export async function getAllDocuments(userId: string): Promise<Document[]> {
     throw new Error("Google account not connected")
   }
 
-  // Check if token is expired
+  let accessToken = token.accessToken
+
   if (new Date() > token.expiresAt) {
-    // Token is expired, refresh it
-    const refreshedToken = await refreshToken(token.refreshToken!)
-
-    // Update the token in the database
-    await db.token.update({
-      where: {
-        id: token.id,
-      },
-      data: {
-        accessToken: refreshedToken.access_token,
-        expiresAt: new Date(Date.now() + refreshedToken.expires_in * 1000),
-      },
-    })
-
-    // Use the new access token
-    token.accessToken = refreshedToken.access_token
-  }
-
-  // Search for all Google Docs files
-  const searchQuery = `mimeType = 'application/vnd.google-apps.document'`
-
-  const response = await fetch(
-    `${GOOGLE_DRIVE_API}/files?q=${encodeURIComponent(searchQuery)}&fields=files(id,name,webViewLink,modifiedTime)`,
-    {
-      headers: {
-        Authorization: `Bearer ${token.accessToken}`,
-      },
-    },
-  )
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch documents")
-  }
-
-  const data = await response.json()
-
-  // Fetch the content of each document
-  const documents: Document[] = []
-
-  for (const file of data.files) {
     try {
-      const docContent = await fetchDocumentContent(file.id, token.accessToken)
+      const refreshedToken = await refreshToken(token.refreshToken!)
+      accessToken = refreshedToken.access_token
 
-      documents.push({
-        id: file.id,
-        name: file.name,
-        content: docContent,
-        url: file.webViewLink,
-        lastModified: file.modifiedTime,
+      await db.token.update({
+        where: { id: token.id },
+        data: {
+          accessToken: refreshedToken.access_token,
+          expiresAt: new Date(Date.now() + refreshedToken.expires_in * 1000),
+        },
       })
     } catch (error) {
-      console.error(`Error fetching content for document ${file.id}:`, error)
+      console.error("Token refresh failed:", error)
+      throw new Error("Failed to refresh access token")
     }
   }
 
-  return documents
+  const searchQuery = `mimeType = 'application/vnd.google-apps.document'`
+  const documents: Document[] = []
+
+  try {
+    const response = await fetch(
+      `${GOOGLE_DRIVE_API}/files?q=${encodeURIComponent(searchQuery)}&fields=files(id,name,webViewLink,modifiedTime)`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken.trim()}`,
+          Accept: 'application/json',
+        },
+      }
+    )
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch documents list: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json()
+
+    for (const file of data.files) {
+      try {
+        const docContent = await fetchDocumentContent(file.id, accessToken)
+        documents.push({
+          id: file.id,
+          name: file.name,
+          content: docContent,
+          url: file.webViewLink,
+          lastModified: file.modifiedTime,
+        })
+      } catch (error) {
+        console.error(`Error fetching content for document ${file.id}:`, error)
+        // Continue with other documents even if one fails
+      }
+    }
+
+    return documents
+
+  } catch (error) {
+    console.error("Error fetching documents:", error)
+    throw error
+  }
 }
 
