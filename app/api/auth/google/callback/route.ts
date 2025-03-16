@@ -73,24 +73,44 @@ export async function GET(request: NextRequest) {
       }
 
       // Database transaction
-      console.log("Updating database...")
+      console.log("Starting database transaction with data:", {
+        email: userData.email,
+        name: userData.name,
+        picture: userData.picture,
+        tokenExpiry: new Date(Date.now() + tokenData.expires_in * 1000)
+      })
 
-      await db.$transaction(async (tx) => {
-        const user = await tx.user.upsert({
-          where: { email: userData.email },
-          create: {
-            email: userData.email,
-            name: userData.name,
-            image: userData.picture,
-          },
-          update: {
-            name: userData.name,
-            image: userData.picture,
-          },
-        })
-        
-          // Store token
-          await tx.token.upsert({
+      try {
+        const result = await db.$transaction(async (tx) => {
+          // 1. Create/Update User
+          console.log("Creating/updating user...")
+          const user = await tx.user.upsert({
+            where: { 
+              email: userData.email 
+            },
+            create: {
+              email: userData.email,
+              name: userData.name || userData.email.split('@')[0],
+              image: userData.picture,
+            },
+            update: {
+              name: userData.name,
+              image: userData.picture,
+            },
+            select: {
+              id: true,
+              email: true
+            }
+          }).catch(error => {
+            console.error("User upsert failed:", error)
+            throw error
+          })
+          
+          console.log("User created/updated:", user)
+
+          // 2. Store Token
+          console.log("Storing token...")
+          const token = await tx.token.upsert({
             where: { 
               userId_provider: {
                 userId: user.id,
@@ -101,38 +121,74 @@ export async function GET(request: NextRequest) {
               userId: user.id,
               provider: "google",
               accessToken: encryptedToken,
-              refreshToken: tokenData.refresh_token,
+              refreshToken: tokenData.refresh_token || null,
               expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
             },
             update: {
               accessToken: encryptedToken,
-              refreshToken: tokenData.refresh_token,
+              refreshToken: tokenData.refresh_token || null,
               expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
             },
+            select: {
+              id: true,
+              provider: true
+            }
+          }).catch(error => {
+            console.error("Token upsert failed:", error)
+            throw error
           })
-  
-          // Update connection status
-          await tx.userConnection.upsert({
+
+          console.log("Token stored:", token)
+
+          // 3. Update Connection Status
+          console.log("Updating connection status...")
+          const connection = await tx.userConnection.upsert({
             where: {
               userId_provider: {
-                userId: session.user.id,
+                userId: user.id,
                 provider: "google"
               }
+            },
+            create: {
+              userId: user.id,
+              provider: "google",
+              isConnected: true,
+              lastConnected: new Date()
             },
             update: {
               isConnected: true,
               lastConnected: new Date()
             },
-            create: {
-              userId: session.user.id,
-              provider: "google",
-              isConnected: true,
-              lastConnected: new Date()
+            select: {
+              id: true,
+              isConnected: true
             }
+          }).catch(error => {
+            console.error("Connection upsert failed:", error)
+            throw error
           })
-      })
 
-      return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/dashboard`)
+          console.log("Connection updated:", connection)
+
+          return { user, token, connection }
+        }, {
+          timeout: 10000, // 10 second timeout
+          isolationLevel: 'Serializable' // Strongest isolation level
+        })
+
+        console.log("Transaction completed successfully:", result)
+        return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/dashboard`)
+
+      } catch (error: any) {
+        console.error("Transaction failed:", {
+          error: error.message,
+          code: error.code,
+          meta: error.meta
+        })
+        return NextResponse.redirect(
+          `${process.env.NEXT_PUBLIC_APP_URL}/?error=${encodeURIComponent('database_error: ' + error.message)}`
+        )
+      }
 
     } catch (error: any) {
       console.error("Detailed error:", error)
