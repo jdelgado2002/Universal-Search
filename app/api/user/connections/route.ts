@@ -5,7 +5,6 @@ import { db } from "@/lib/db"
 export async function GET() {
   try {
     const session = await auth()
-    console.log("Session data:", JSON.stringify(session, null, 2))
 
     if (!session?.user?.email) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -19,7 +18,7 @@ export async function GET() {
         accounts: true
       }
     })
-    console.log("User data:", JSON.stringify(user, null, 2))
+
 
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })
@@ -34,7 +33,7 @@ export async function GET() {
         user: true
       }
     })
-    console.log("Google connection:", JSON.stringify(googleConnection, null, 2))
+
 
     return NextResponse.json({
       google: googleConnection?.isConnected ?? false,
@@ -46,7 +45,7 @@ export async function GET() {
       }
     })
   } catch (error) {
-    console.error("Error fetching connections:", error)
+
     return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }

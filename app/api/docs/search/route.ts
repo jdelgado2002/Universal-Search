@@ -170,7 +170,6 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    console.error("Google API error after retries:", lastError)
     return NextResponse.json({
       error: "Failed to search documents",
       details: lastError?.error?.message || "Unknown error",
@@ -182,7 +181,6 @@ export async function GET(request: NextRequest) {
     }, { status: 401 })
 
   } catch (error) {
-    console.error("Error searching documents:", error)
     return NextResponse.json({
       error: "Server error",
       details: error instanceof Error ? error.message : "Unknown error",

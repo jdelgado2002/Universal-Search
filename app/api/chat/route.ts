@@ -108,7 +108,6 @@ Answer the user's questions based on the content of their documents. If you don'
     })
 
   } catch (error) {
-    console.error("Chat error:", error)
     if (error instanceof z.ZodError) {
       return NextResponse.json({ 
         error: "Invalid request format",
