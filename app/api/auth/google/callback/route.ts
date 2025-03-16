@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
+import { auth } from "@/auth"
 import { db } from "@/lib/db"
 import { encryptToken } from "@/lib/encryption"
-import { getServerSession } from "next-auth"
-import { authOptions } from "@/lib/auth"
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions)
+    const session = await auth()
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
@@ -28,7 +27,7 @@ export async function GET(request: NextRequest) {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
-          code: code!,
+          code,
           client_id: process.env.GOOGLE_CLIENT_ID!,
           client_secret: process.env.GOOGLE_CLIENT_SECRET!,
           redirect_uri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`,
@@ -37,6 +36,8 @@ export async function GET(request: NextRequest) {
       })
 
       if (!tokenResponse.ok) {
+        const errorData = await tokenResponse.json()
+        console.error("Token exchange failed:", errorData)
         throw new Error("Failed to exchange code for token")
       }
 
@@ -55,7 +56,7 @@ export async function GET(request: NextRequest) {
       const userData = await userResponse.json()
 
       // Use transaction to ensure data consistency
-      await prisma.$transaction(async (tx) => {
+      await db.$transaction(async (tx) => {
         // Create or update user
         const user = await tx.user.upsert({
           where: { email: userData.email },
@@ -82,15 +83,17 @@ export async function GET(request: NextRequest) {
             userId: user.id,
             provider: "google",
             accessToken: encryptedToken,
+            refreshToken: tokenData.refresh_token,
             expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
           },
           update: {
             accessToken: encryptedToken,
+            refreshToken: tokenData.refresh_token,
             expiresAt: new Date(Date.now() + tokenData.expires_in * 1000),
           },
         })
 
-        // Store the connection in the database
+        // Update connection status
         await tx.userConnection.upsert({
           where: {
             userId_provider: {
