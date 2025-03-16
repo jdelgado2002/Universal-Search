@@ -4,35 +4,45 @@ const prisma = new PrismaClient()
 
 async function main() {
   try {
-    // Check database connection
     await prisma.$connect()
     console.log('✓ Database connection successful')
 
-    // Check tables
-    const users = await prisma.user.count()
-    console.log(`✓ Users table exists (${users} records)`)
-
-    const tokens = await prisma.token.count()
-    console.log(`✓ Tokens table exists (${tokens} records)`)
-
-    const connections = await prisma.userConnection.count()
-    console.log(`✓ UserConnections table exists (${connections} records)`)
-
-    // Sample query
-    const recentConnections = await prisma.userConnection.findMany({
-      where: { isConnected: true },
-      include: { user: true },
-      take: 5,
-      orderBy: { lastConnected: 'desc' }
+    // Detailed user query
+    const users = await prisma.user.findMany({
+      include: {
+        accounts: true,
+        connections: true
+      }
     })
 
-    console.log('\nRecent connections:')
-    console.table(recentConnections.map(conn => ({
+    console.log('\nUsers:')
+    console.table(users.map(user => ({
+      id: user.id,
+      email: user.email,
+      accountCount: user.accounts.length,
+      connectionCount: user.connections.length
+    })))
+
+    // Show all connections with user details
+    const connections = await prisma.userConnection.findMany({
+      include: {
+        user: {
+          include: {
+            accounts: true
+          }
+        }
+      }
+    })
+
+    console.log('\nConnections with User Details:')
+    console.table(connections.map(conn => ({
+      connectionId: conn.id,
       userId: conn.userId,
-      email: conn.user.email,
+      userEmail: conn.user.email,
       provider: conn.provider,
       connected: conn.isConnected,
-      lastConnected: conn.lastConnected
+      lastConnected: conn.lastConnected,
+      hasAccount: conn.user.accounts.length > 0
     })))
 
   } catch (error) {
