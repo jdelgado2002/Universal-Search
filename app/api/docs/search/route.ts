@@ -114,7 +114,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    const searchQuery = `name contains '${query}' and mimeType = 'application/vnd.google-apps.document'`
+    const searchQuery = `name contains '${query}'`
     let retryCount = 0
     let lastError: any = null
 

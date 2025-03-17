@@ -58,11 +58,19 @@ export async function POST(request: NextRequest) {
     const validatedBody = requestSchema.parse(body)
     const { message, history } = validatedBody
 
-    let documents = []
-    if (message.toLowerCase().includes("search") || message.toLowerCase().includes("find")) {
-      const searchTerms = message.replace(/search|find|for|about/gi, "").trim()
-      documents = await searchDocuments(user.id, searchTerms)
-    } else {
+    let documents: import('@/lib/document-service').Document[] = []
+    // get search terms from the message and search for relevant documents
+    if (message) {
+      const searchTerms = message.split(" ").filter(term => term.length > 2)
+      for (const term of searchTerms) {
+        const searchTerm = term.trim()
+        if (searchTerm.length > 2) {
+          // Search for documents matching the search term
+          const foundDocuments = await searchDocuments(user.id, searchTerm)
+          documents = [...documents, ...foundDocuments]
+        }
+      }
+      // If no documents found, fall back to getting all documents
       documents = await getAllDocuments(user.id)
     }
 
@@ -72,7 +80,7 @@ export async function POST(request: NextRequest) {
           .join("\n")
       : "No relevant documents found."
 
-    const conversationHistory = history 
+    const conversationHistory = history
       ? history.map(msg => `${msg.role}: ${msg.content}`).join("\n")
       : ""
 
@@ -80,7 +88,7 @@ export async function POST(request: NextRequest) {
       {
         role: "system",
         content: `You are a helpful document assistant that answers questions based on the user's Google Docs.
-          
+
 Here are the relevant documents:
 ${documentContext}
 
@@ -102,23 +110,23 @@ Answer the user's questions based on the content of their documents. If you don'
       max_tokens: 1000
     })
 
-    return NextResponse.json({ 
+    return NextResponse.json({
       response: completion.choices[0].message.content,
-      documents: documents.map(doc => ({ 
-        name: doc.name, 
-        preview: doc.content.substring(0, 100) 
+      documents: documents.map(doc => ({
+        name: doc.name,
+        preview: doc.content.substring(0, 100)
       }))
     })
 
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json({ 
+      return NextResponse.json({
         error: "Invalid request format",
-        details: error.errors 
+        details: error.errors
       }, { status: 400 })
     }
-    return NextResponse.json({ 
-      error: error instanceof Error ? error.message : "Failed to generate response" 
+    return NextResponse.json({
+      error: error instanceof Error ? error.message : "Failed to generate response"
     }, { status: 500 })
   }
 }

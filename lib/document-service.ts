@@ -1,10 +1,22 @@
 import { db } from "@/lib/db"
+import { google } from 'googleapis'
+import pdfParse from 'pdf-parse'
+
+// Debug configuration
+const DEBUG = process.env.NODE_ENV !== 'production'
+const MAX_RETRIES = 3
+const RETRY_DELAY = 1000 // 1 second
+
+// Logging utility
+const log = {
+  debug: (...args: any[]) => DEBUG && console.log('[Debug]', ...args),
+  error: (...args: any[]) => console.error('[Error]', ...args),
+  timing: (label: string, startTime: number) => DEBUG && 
+    console.log(`[Timing] ${label}: ${Date.now() - startTime}ms`)
+}
 
 // Google API endpoints
 const GOOGLE_DRIVE_API = "https://www.googleapis.com/drive/v3"
-const GOOGLE_DOCS_API = "https://www.googleapis.com/docs/v1"
-const MAX_RETRIES = 3
-const RETRY_DELAY = 1000 // 1 second
 
 export interface Document {
   id: string
@@ -50,8 +62,7 @@ export async function searchDocuments(userId: string, query: string): Promise<Do
   }
 
   // Search for documents in Google Drive
-  // We're specifically looking for Google Docs files
-  const searchQuery = `name contains '${query}' and mimeType = 'application/vnd.google-apps.document'`
+  const searchQuery = `name contains '${query}'`
 
   const response = await fetch(
     `${GOOGLE_DRIVE_API}/files?q=${encodeURIComponent(searchQuery)}&fields=files(id,name,webViewLink,modifiedTime)`,
@@ -90,76 +101,169 @@ export async function searchDocuments(userId: string, query: string): Promise<Do
   return documents
 }
 
+const SUPPORTED_MIME_TYPES = {
+  'application/vnd.google-apps.document': 'googleDoc',
+  'application/vnd.google-apps.spreadsheet': 'googleSheet',
+  'application/pdf': 'pdf',
+  'text/plain': 'text',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'word'
+} as const;
+
+type SupportedMimeType = keyof typeof SUPPORTED_MIME_TYPES;
+
 async function fetchDocumentContent(documentId: string, accessToken: string): Promise<string> {
+  const startTime = Date.now()
+  log.debug(`Fetching document ${documentId}`)
+
   if (!accessToken?.trim()) {
     throw new Error("Invalid access token")
   }
 
-  const response = await fetch(`${GOOGLE_DOCS_API}/documents/${documentId}`, {
-    headers: {
-      'Authorization': `Bearer ${accessToken.trim()}`,
-      'Accept': 'application/json',
-    },
-  })
-
-  // Check if we got HTML instead of JSON (usually means auth error)
-  const contentType = response.headers.get('content-type')
-  if (contentType?.includes('text/html')) {
-    console.error('Authentication error - received HTML response:', {
-      documentId,
-      status: response.status,
-      contentType
-    })
-    throw new Error("Authentication failed - please reconnect your Google account")
-  }
-
-  // Handle specific error cases
-  if (response.status === 401) {
-    throw new Error("Token expired or invalid")
-  }
-
-  if (response.status === 403) {
-    throw new Error("Access denied to document")
-  }
-
-  if (!response.ok) {
-    const errorText = await response.text()
-    let errorData
-    try {
-      errorData = JSON.parse(errorText)
-    } catch {
-      errorData = { error: errorText }
-    }
-    
-    console.error("Google API Error:", {
-      documentId,
-      status: response.status,
-      statusText: response.statusText,
-      errorData
-    })
-    throw new Error(`Failed to fetch document: ${response.status} ${response.statusText}`)
-  }
-
-  const data = await response.json()
+  // Initialize Google APIs
+  const auth = new google.auth.OAuth2()
+  auth.setCredentials({ access_token: accessToken.trim() })
   
-  if (!data?.body?.content) {
-    console.warn(`Document ${documentId} has no content`)
-    return ""
-  }
+  const drive = google.drive({ version: 'v3', auth })
+  const docs = google.docs({ version: 'v1', auth })
+  const sheets = google.sheets({ version: 'v4', auth })
 
-  // Extract text content from the document
-  let content = ""
-  for (const element of data.body.content) {
+  try {
+    // Get file metadata
+    log.debug('Fetching file metadata')
+    const file = await drive.files.get({
+      fileId: documentId,
+      fields: 'mimeType,name'
+    })
+
+    const { mimeType, name } = file.data
+    log.debug(`Document type: ${mimeType}, name: ${name}`)
+    
+    let content = '';
+    const docType = SUPPORTED_MIME_TYPES[mimeType as SupportedMimeType]
+    
+    log.debug(`Processing ${docType || 'unknown'} document type`)
+
+    switch (docType) {
+      case 'googleDoc': {
+        log.debug('Fetching Google Doc content')
+        const doc = await docs.documents.get({ documentId })
+        content = extractTextFromDoc(doc.data.body?.content || [])
+        log.debug(`Extracted ${content.length} characters from Google Doc`)
+        break
+      }
+
+      case 'googleSheet': {
+        log.debug('Fetching Google Sheet content')
+        const sheet = await sheets.spreadsheets.get({
+          spreadsheetId: documentId,
+          ranges: [],
+          includeGridData: true
+        })
+        content = extractTextFromSheet(sheet.data.sheets || [])
+        log.debug(`Extracted ${content.length} characters from Sheet`)
+        break
+      }
+
+      case 'pdf': {
+        log.debug('Fetching PDF content')
+        const pdfFile = await drive.files.get(
+          { fileId: documentId, alt: 'media' },
+          { responseType: 'arraybuffer' }
+        )
+        const pdfData = await pdfParse(pdfFile.data)
+        content = pdfData.text
+        log.debug(`Extracted ${content.length} characters from PDF`)
+        break
+      }
+
+      case 'text': {
+        log.debug('Fetching text file content')
+        const textFile = await drive.files.get(
+          { fileId: documentId, alt: 'media' },
+          { responseType: 'text' }
+        )
+        content = String(textFile.data)
+        log.debug(`Extracted ${content.length} characters from text file`)
+        break
+      }
+
+      case 'word': {
+        log.debug('Exporting Word document')
+        const exported = await drive.files.export({
+          fileId: documentId,
+          mimeType: 'text/plain'
+        }, {
+          responseType: 'text'
+        })
+        content = String(exported.data)
+        log.debug(`Extracted ${content.length} characters from Word doc`)
+        break
+      }
+
+      default: {
+        log.debug(`Unsupported file type: ${mimeType}`)
+        return `[Unsupported file type: ${mimeType}]`
+      }
+    }
+
+    log.timing('Document processing', startTime)
+    return content || `[No content available in ${name}]`
+
+  } catch (error: any) {
+    log.error(`Error processing document ${documentId}:`, {
+      error: error.message,
+      code: error.code,
+      status: error.status,
+      details: error.details || error.response?.data
+    })
+    
+    // Retry on specific errors
+    if (error.code === 429 || error.code === 503) {
+      log.debug('Rate limited or service unavailable, retrying...')
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY))
+      return fetchDocumentContent(documentId, accessToken)
+    }
+
+    return `[Error processing document: ${error.message}]`
+  }
+}
+
+function extractTextFromDoc(content: any[]): string {
+  let text = ""
+  
+  for (const element of content) {
     if (element.paragraph?.elements) {
       for (const paragraphElement of element.paragraph.elements) {
         if (paragraphElement.textRun?.content) {
-          content += paragraphElement.textRun.content
+          text += paragraphElement.textRun.content
         }
       }
     }
   }
+  
+  return text
+}
 
-  return content
+function extractTextFromSheet(sheets: any[]): string {
+  let text = ""
+  
+  for (const sheet of sheets) {
+    if (sheet.data?.[0]?.rowData) {
+      for (const row of sheet.data[0].rowData) {
+        if (row.values) {
+          const rowText = row.values
+            .map(cell => cell.formattedValue || '')
+            .filter(Boolean)
+            .join('\t')
+          if (rowText) {
+            text += rowText + '\n'
+          }
+        }
+      }
+    }
+  }
+  
+  return text
 }
 
 async function refreshToken(refreshToken: string) {
@@ -200,7 +304,7 @@ export async function getAllDocuments(userId: string): Promise<Document[]> {
   let accessToken = token.accessToken
 
   if (new Date() > token.expiresAt) {
-    try {
+    try { 
       const refreshedToken = await refreshToken(token.refreshToken!)
       accessToken = refreshedToken.access_token
 
@@ -217,7 +321,7 @@ export async function getAllDocuments(userId: string): Promise<Document[]> {
     }
   }
 
-  const searchQuery = `mimeType = 'application/vnd.google-apps.document'`
+  const searchQuery = ``
   const documents: Document[] = []
 
   try {
