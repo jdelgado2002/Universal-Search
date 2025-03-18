@@ -1,6 +1,6 @@
 import { db } from "@/lib/db"
 import { google } from 'googleapis'
-import pdfParse from 'pdf-parse'
+import { extractTextFromPDF } from './utils/pdf-utils'
 
 // Debug configuration
 const DEBUG = process.env.NODE_ENV !== 'production'
@@ -101,12 +101,22 @@ export async function searchDocuments(userId: string, query: string): Promise<Do
   return documents
 }
 
+// Update the SUPPORTED_MIME_TYPES object to better categorize file types
 const SUPPORTED_MIME_TYPES = {
+  // Google native formats
   'application/vnd.google-apps.document': 'googleDoc',
   'application/vnd.google-apps.spreadsheet': 'googleSheet',
+  'application/vnd.google-apps.presentation': 'googleSlides',
+  
+  // Binary formats (need direct download)
   'application/pdf': 'pdf',
   'text/plain': 'text',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'word'
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'binary',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'binary',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'binary',
+  'application/msword': 'binary',
+  'application/vnd.ms-excel': 'binary',
+  'application/vnd.ms-powerpoint': 'binary'
 } as const;
 
 type SupportedMimeType = keyof typeof SUPPORTED_MIME_TYPES;
@@ -164,15 +174,36 @@ async function fetchDocumentContent(documentId: string, accessToken: string): Pr
         break
       }
 
+      case 'googleSlides': {
+        log.debug('Exporting Google Slides to text')
+        // For Google Slides, we need to export as text
+        const exported = await drive.files.export({
+          fileId: documentId,
+          mimeType: 'text/plain'
+        }, {
+          responseType: 'text'
+        })
+        content = String(exported.data)
+        log.debug(`Extracted ${content.length} characters from Slides`)
+        break
+      }
+
       case 'pdf': {
         log.debug('Fetching PDF content')
-        const pdfFile = await drive.files.get(
-          { fileId: documentId, alt: 'media' },
-          { responseType: 'arraybuffer' }
-        )
-        const pdfData = await pdfParse(pdfFile.data)
-        content = pdfData.text
-        log.debug(`Extracted ${content.length} characters from PDF`)
+        try {
+          // Download the PDF file directly
+          const pdfFile = await drive.files.get(
+            { fileId: documentId, alt: 'media' },
+            { responseType: 'arraybuffer' }
+          )
+          
+          const result = await extractTextFromPDF(pdfFile.data as ArrayBuffer)
+          content = result.text
+          log.debug(`Extracted ${content.length} characters from PDF`)
+        } catch (error) {
+          log.error('Error parsing PDF:', error)
+          content = '[Error: Unable to parse PDF content]'
+        }
         break
       }
 
@@ -187,16 +218,35 @@ async function fetchDocumentContent(documentId: string, accessToken: string): Pr
         break
       }
 
-      case 'word': {
-        log.debug('Exporting Word document')
-        const exported = await drive.files.export({
-          fileId: documentId,
-          mimeType: 'text/plain'
-        }, {
-          responseType: 'text'
-        })
-        content = String(exported.data)
-        log.debug(`Extracted ${content.length} characters from Word doc`)
+      case 'binary': {
+        log.debug('Handling binary file (Word, Excel, etc.)')
+        try {
+          // Try to download as text first (works for some formats)
+          const binaryFile = await drive.files.get(
+            { fileId: documentId, alt: 'media' },
+            { responseType: 'arraybuffer' }
+          )
+          
+          // Check if it's a Word document by mime type
+          if (mimeType.includes('word')) {
+            log.debug('Processing Word document')
+            // You might want to add a Word document parser here
+            // For now, we'll return a placeholder
+            content = `[Word document content: ${name}. Binary format - full text extraction not available]`
+          } 
+          // Check if it's an Excel document
+          else if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) {
+            log.debug('Processing Excel document')
+            content = `[Excel document content: ${name}. Binary format - full text extraction not available]`
+          }
+          // Default case for other binary formats
+          else {
+            content = `[Binary file: ${name}. Format not fully supported for text extraction]`
+          }
+        } catch (error) {
+          log.error('Error processing binary file:', error)
+          content = `[Error: Unable to process binary file ${name}]`
+        }
         break
       }
 
@@ -214,7 +264,7 @@ async function fetchDocumentContent(documentId: string, accessToken: string): Pr
       error: error.message,
       code: error.code,
       status: error.status,
-      details: error.details || error.response?.data
+      details: error.response?.data
     })
     
     // Retry on specific errors
@@ -224,7 +274,8 @@ async function fetchDocumentContent(documentId: string, accessToken: string): Pr
       return fetchDocumentContent(documentId, accessToken)
     }
 
-    return `[Error processing document: ${error.message}]`
+    // Return error message for user
+    return `[Error: ${error.message || 'Failed to fetch document content'}]`
   }
 }
 
