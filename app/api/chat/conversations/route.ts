@@ -74,8 +74,6 @@ export async function POST(request: NextRequest) {
           documents = [...documents, ...foundDocuments]
         }
       }
-      // If no documents found, fall back to getting all documents
-      documents = await getAllDocuments(user.id)
     }
 
     const documentContext = documents.length > 0

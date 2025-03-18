@@ -15,15 +15,15 @@ const log = {
 // Configure PDF.js for Node.js environment
 // This prevents the worker error in Next.js server environment
 if (typeof window === 'undefined') {
-  // Use dynamic import for server environment
-  // The GlobalWorkerOptions is available directly from the main package
+  // For server-side rendering in Next.js, we need to properly configure the worker
+  // Import directly from the main module
   import('pdfjs-dist').then(pdfjs => {
     if (pdfjs.GlobalWorkerOptions) {
-      // Set a dummy worker source for server-side
+      // For server-side, we don't need an actual worker
       pdfjs.GlobalWorkerOptions.workerSrc = '';
     }
   }).catch(err => {
-    log.error('Error loading PDF.js in server environment:', err);
+    log.error('Failed to configure PDF.js in server environment:', err);
   });
 }
 
