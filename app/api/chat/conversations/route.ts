@@ -1,9 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { auth } from "@/auth"
-import { searchDocuments, getAllDocuments } from "@/lib/document-service"
+import { searchDocuments } from "@/lib/document-service"
 import { z } from "zod"
 import { db } from "@/lib/db"
 import OpenAI from 'openai'
+
+// Constants for limits
+const MAX_SEARCH_TERMS = 5
+const MAX_DOCUMENTS = 10
+const MIN_TERM_LENGTH = 3
 
 // Type definitions
 interface ChatMessage {
@@ -27,8 +32,42 @@ const requestSchema = z.object({
   history: z.array(chatMessageSchema).optional()
 })
 
+// Add new helper function to extract search terms
+async function extractSearchTerms(message: string): Promise<string[]> {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: `You are an expert in identifying the most relevant search keywords based on user input. Your goal is to extract and generate the most effective keyterms that capture the intent behind the query. These keywords will be used to search for relevant documents in platforms like Google Docs, Jira, Asana, and others.
+
+Guidelines:
+- Focus on core intent rather than exact phrasing.
+- Extract high-signal words and remove unnecessary filler words.
+- Use synonyms and variations when helpful.
+- Preserve domain-specific terminology.
+- Format output as a comma-separated list of keywords.
+
+Your response should contain only the keywords, formatted as a comma-separated list, with no additional text.`
+      },
+      {
+        role: "user",
+        content: message
+      }
+    ],
+    temperature: 0.3,
+    max_tokens: 100
+  })
+
+  const searchTerms = completion.choices[0].message.content?.split(',')
+    .map(term => term.trim())
+    .filter(term => term.length >= MIN_TERM_LENGTH)
+    .slice(0, MAX_SEARCH_TERMS) ?? []
+
+  return searchTerms
+}
+
 export async function POST(request: NextRequest) {
-  const startTime = Date.now()
 
   try {
     const session = await auth()
@@ -62,23 +101,33 @@ export async function POST(request: NextRequest) {
     const validatedBody = requestSchema.parse(body)
     const { message, history } = validatedBody
 
-    let documents: import('@/lib/document-service').Document[] = []
-    // get search terms from the message and search for relevant documents
+    // Use a Map to track unique documents by ID
+    const documentMap = new Map()
+
     if (message) {
-      const searchTerms = message.split(" ").filter(term => term.length > 2)
-      for (const term of searchTerms) {
-        const searchTerm = term.trim()
-        if (searchTerm.length > 2) {
-          // Search for documents matching the search term
-          const foundDocuments = await searchDocuments(user.id, searchTerm)
-          documents = [...documents, ...foundDocuments]
-        }
+      // Extract search terms using OpenAI
+      const searchTerms = await extractSearchTerms(message)
+      
+      if (searchTerms.length > 0) {
+        // Single search operation for all terms
+        const searchQuery = searchTerms.join(" ")
+        const foundDocuments = await searchDocuments(user.id, searchQuery)
+
+        // Add documents to map, ensuring uniqueness
+        foundDocuments.forEach(doc => {
+          if (!documentMap.has(doc.id) && documentMap.size < MAX_DOCUMENTS) {
+            documentMap.set(doc.id, doc)
+          }
+        })
       }
     }
 
+    // Convert map back to array
+    const documents = Array.from(documentMap.values())
+
     const documentContext = documents.length > 0
       ? documents
-          .map(doc => `Document: ${doc.name}\nContent: ${doc.content.substring(0, 1000)}...\n\n`)
+          .map(doc => `Document: ${doc.name}\nContent: ${doc.content.substring(0, 10000)}...\n\n`)
           .join("\n")
       : "No relevant documents found."
 
@@ -106,10 +155,10 @@ Answer the user's questions based on the content of their documents. If you don'
     ]
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4",
+      model: "gpt-4o-mini",
       messages,
       temperature: 0.7,
-      max_tokens: 1000
+      max_tokens: 10000
     })
     
     return new NextResponse(

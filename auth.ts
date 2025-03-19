@@ -73,6 +73,7 @@ export const {
       },
     }),
   ],
+  trustHost: true, // Enable trust for host validation
   callbacks: {
     async jwt({ token, user, account }) {
       if (user) {

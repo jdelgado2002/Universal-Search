@@ -1,11 +1,66 @@
 import { db } from "@/lib/db"
 import { google } from 'googleapis'
 import { extractTextFromPDF } from './utils/pdf-utils'
+import { extractTextFromWord } from './utils/word-utils'
+import mammoth from 'mammoth' // For Word docs
+
+// Cache implementation
+const documentCache = new Map<string, {
+  content: string;
+  timestamp: number;
+}>()
+
+const CACHE_TTL = 1000 * 60 * 30 // 30 minutes
+const MAX_RETRIES = 3
+const RETRY_DELAY = 1000
+
+async function fetchWithRetry(url: string, options: any, retries = MAX_RETRIES): Promise<Response> {
+  try {
+    const response = await fetch(url, options)
+    if (!response.ok && retries > 0) {
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY))
+      return fetchWithRetry(url, options, retries - 1)
+    }
+    return response
+  } catch (error) {
+    if (retries > 0) {
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY))
+      return fetchWithRetry(url, options, retries - 1)
+    }
+    throw error
+  }
+}
+
+async function processWordDocument(buffer: ArrayBuffer): Promise<string> {
+  try {
+    const result = await mammoth.extractRawText({ arrayBuffer: buffer })
+    return result.value || '[No text content found in Word document]'
+  } catch (error) {
+    console.error('Error processing Word document:', error)
+    return '[Error: Unable to process Word document]'
+  }
+}
+
+async function processPDF(buffer: ArrayBuffer): Promise<string> {
+  try {
+    // Try primary PDF parser
+    const result = await extractTextFromPDF(buffer)
+    if (result.text && result.text.length > 0) {
+      return result.text
+    }
+
+    // Fallback to alternative method if primary fails
+    const pdf = await import('pdf-parse')
+    const data = await pdf.default(Buffer.from(buffer))
+    return data.text || '[No text content found in PDF]'
+  } catch (error) {
+    console.error('Error processing PDF:', error)
+    return '[Error: Unable to parse PDF content]'
+  }
+}
 
 // Debug configuration
 const DEBUG = process.env.NODE_ENV !== 'production'
-const MAX_RETRIES = 3
-const RETRY_DELAY = 1000 // 1 second
 
 // Logging utility
 const log = {
@@ -61,11 +116,29 @@ export async function searchDocuments(userId: string, query: string): Promise<Do
     token.accessToken = refreshedToken.access_token
   }
 
-  // Search for documents in Google Drive
-  const searchQuery = `name contains '${query}'`
+  // Clean and prepare search terms
+  const terms = query.split(' ').map(term => term.trim())
+    .filter(term => term.length >= 2) // Filter out very short terms
+    .map(term => term.replace(/['"]/g, '')) // Remove quotes that could break the query
+    
+  if (terms.length === 0) {
+    return []
+  }
+
+  // Build the combined search query
+  const nameQuery = `(${terms.map(term => `name contains '${term}'`).join(' OR ')})`
+  const contentQuery = `(${terms.map(term => `fullText contains '${term}'`).join(' AND ')})`
+  const searchQuery = `${nameQuery} OR ${contentQuery}`
+
+  // Add mimeType filter to only search supported document types
+  const mimeTypeFilter = Object.keys(SUPPORTED_MIME_TYPES)
+    .map(type => `mimeType = '${type}'`)
+    .join(' OR ')
+  
+  const finalQuery = `(${searchQuery}) AND (${mimeTypeFilter})`
 
   const response = await fetch(
-    `${GOOGLE_DRIVE_API}/files?q=${encodeURIComponent(searchQuery)}&fields=files(id,name,webViewLink,modifiedTime)`,
+    `${GOOGLE_DRIVE_API}/files?q=${encodeURIComponent(finalQuery)}&fields=files(id,name,webViewLink,modifiedTime,mimeType)`,
     {
       headers: {
         Authorization: `Bearer ${token.accessToken}`,
@@ -122,6 +195,12 @@ const SUPPORTED_MIME_TYPES = {
 type SupportedMimeType = keyof typeof SUPPORTED_MIME_TYPES;
 
 async function fetchDocumentContent(documentId: string, accessToken: string): Promise<string> {
+  // Check cache first
+  const cached = documentCache.get(documentId)
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.content
+  }
+
   const startTime = Date.now()
   log.debug(`Fetching document ${documentId}`)
 
@@ -230,9 +309,7 @@ async function fetchDocumentContent(documentId: string, accessToken: string): Pr
           // Check if it's a Word document by mime type
           if (mimeType.includes('word')) {
             log.debug('Processing Word document')
-            // You might want to add a Word document parser here
-            // For now, we'll return a placeholder
-            content = `[Word document content: ${name}. Binary format - full text extraction not available]`
+            content = await extractTextFromWord(Buffer.from(binaryFile.data))
           } 
           // Check if it's an Excel document
           else if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) {
@@ -254,6 +331,14 @@ async function fetchDocumentContent(documentId: string, accessToken: string): Pr
         log.debug(`Unsupported file type: ${mimeType}`)
         return `[Unsupported file type: ${mimeType}]`
       }
+    }
+
+    // Cache the result
+    if (content && content.length > 0) {
+      documentCache.set(documentId, {
+        content,
+        timestamp: Date.now()
+      })
     }
 
     log.timing('Document processing', startTime)
