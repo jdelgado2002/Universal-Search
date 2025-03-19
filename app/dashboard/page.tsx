@@ -24,29 +24,53 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(false)
   const [documents, setDocuments] = useState<Document[]>([])
   const [isGoogleConnected, setIsGoogleConnected] = useState(false)
+  const [isCheckingConnection, setIsCheckingConnection] = useState(true)
   const { toast } = useToast()
 
   useEffect(() => {
-    // Check if user is authenticated
-    if (status === "unauthenticated") {
-      router.push("/auth/signin")
-    }
-
-    // Check if Google is connected
     const checkGoogleConnection = async () => {
+      if (!session?.user?.id) return false
+      
+      setIsCheckingConnection(true)
       try {
-        const response = await fetch("/api/user/connections")
+        const response = await fetch("/api/user/connections", {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        })
+
+        if (!response.ok) {
+          throw new Error("Failed to fetch connection status")
+        }
+
         const data = await response.json()
-        setIsGoogleConnected(data.google || false)
+        console.log("Connection status:", data) // Debug log
+        return data.google || false
       } catch (error) {
         console.error("Error checking connections:", error)
+        toast({
+          title: "Connection Error",
+          description: "Failed to check Google connection status",
+          variant: "destructive",
+        })
+        return false
+      } finally {
+        setIsCheckingConnection(false)
       }
     }
 
-    if (status === "authenticated") {
-      checkGoogleConnection()
+    const initializeConnection = async () => {
+      if (status === "authenticated") {
+        const isConnected = await checkGoogleConnection()
+        setIsGoogleConnected(isConnected)
+      } else if (status === "unauthenticated") {
+        router.push("/auth/signin")
+      }
     }
-  }, [status, router])
+
+    initializeConnection()
+  }, [status, session?.user?.id, router, toast])
 
   const searchDocuments = async () => {
     if (!query.trim()) return
@@ -77,7 +101,7 @@ export default function Dashboard() {
     router.push("/auth/signin")
   }
 
-  if (status === "loading") {
+  if (status === "loading" || isCheckingConnection) {
     return (
       <div className="flex h-screen items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin" />

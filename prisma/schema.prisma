@@ -1,6 +1,5 @@
 generator client {
   provider = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
@@ -20,6 +19,7 @@ model User {
   accounts      Account[]
   sessions      Session[]
   tokens        Token[]
+  connections   UserConnection[]
 }
 
 model Account {
@@ -39,6 +39,7 @@ model Account {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 model Session {
@@ -47,6 +48,8 @@ model Session {
   userId       String
   expires      DateTime
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model VerificationToken {
@@ -61,13 +64,28 @@ model Token {
   id           String   @id @default(cuid())
   userId       String
   provider     String
-  accessToken  String   @db.Text
-  refreshToken String?  @db.Text
+  accessToken  String   @db.Text  // Make sure this is Text type
+  refreshToken String?  @db.Text  // Make sure this is Text type
   expiresAt    DateTime
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider])
+  @@index([userId])
+}
+
+model UserConnection {
+  id            String   @id @default(cuid())
+  userId        String
+  provider      String
+  isConnected   Boolean  @default(false)
+  lastConnected DateTime  // Make sure this field exists
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@index([provider])
 }
 

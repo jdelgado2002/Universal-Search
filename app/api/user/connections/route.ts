@@ -1,33 +1,51 @@
-import { type NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
 import { auth } from "@/auth"
-import { prisma } from "@/lib/db"
+import { db } from "@/lib/db"
 
-export async function GET(request: NextRequest) {
-  // Get the authenticated user
-  const session = await auth()
-
-  if (!session || !session.user) {
-    return NextResponse.json({ error: "Not authenticated" }, { status: 401 })
-  }
-
+export async function GET() {
   try {
-    // Check if the user has connected Google
-    const googleToken = await prisma.token.findUnique({
-      where: {
-        userId_provider: {
-          userId: session.user.id,
-          provider: "google",
-        },
-      },
+    const session = await auth()
+
+    if (!session?.user?.email) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
+
+    // Find user by email instead of id
+    const user = await db.user.findUnique({
+      where: { email: session.user.email },
+      include: {
+        connections: true,
+        accounts: true
+      }
     })
 
-    // Return the connections
+
+    if (!user) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 })
+    }
+
+    const googleConnection = await db.userConnection.findFirst({
+      where: {
+        userId: user.id, // Use the database user.id instead of session.user.id
+        provider: "google"
+      },
+      include: {
+        user: true
+      }
+    })
+
+
     return NextResponse.json({
-      google: !!googleToken,
+      google: googleConnection?.isConnected ?? false,
+      debug: {
+        userEmail: session.user.email,
+        userId: user.id,
+        foundUser: true,
+        connectionCount: user.connections.length
+      }
     })
   } catch (error) {
-    console.error("Error checking connections:", error)
-    return NextResponse.json({ error: "Server error" }, { status: 500 })
+
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
 }
-
